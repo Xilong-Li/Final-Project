@@ -1,0 +1,518 @@
+---
+title: "Final Project"
+author: "Xilong Li (3467966)"
+date: '2022-06-09'
+output:
+  pdf_document:
+    toc: yes
+    df_print: kable
+  html_document:
+    toc: yes
+    toc_float: yes
+    code_folding: hide
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Introduction
+### Loading Data and Packages
+```{r,message=FALSE}
+library(tidymodels)
+library(tidyverse)
+library(MASS)
+library(glmnet)
+library(janitor) 
+library(discrim)
+library(poissonreg)
+library(klaR)
+library(rpart.plot)
+library(vip)
+library(randomForest)
+library(xgboost)
+library(corrplot)
+library(ranger)
+```
+
+* <mark>gross_profit: </mark>       
+* <mark>category: </mark>       
+* <mark>volume: </mark>       
+* <mark>volume_range: </mark>       
+* <mark>package: </mark>        
+* <mark>flavor: </mark>       
+* <mark>price: </mark>        
+* <mark>StorePerOrder: </mark>        
+* <mark>AmountPerOrder: </mark>       
+* <mark>Sale_Store: </mark>       
+* <mark>initial_days: </mark>       
+
+```{r}
+original_data <- read.csv("Translated_data.csv")
+head(original_data)
+dim(original_data)
+
+set.seed(2216)
+```
+
+
+## Data Cleansing
+
+```{r}
+original_data <- original_data %>% 
+  clean_names()
+
+head(original_data)
+```
+
+
+```{r}
+selected_data <- original_data %>% 
+  mutate(category = factor(category),
+         volume_range = factor(volume_range),
+         package = factor(package),
+         flavor = factor(flavor),
+         volume = unlist(strsplit(volume, split='g', fixed=TRUE)),
+         volume = as.numeric(volume)) %>% 
+  dplyr::select(
+    gross_profit,
+    category,
+    volume,
+    volume_range,
+    package,
+    flavor,
+    price,
+    store_per_order,
+    amount_per_order,
+    sale_store,
+    initial_days) %>% 
+  filter(gross_profit != 0)
+
+head(selected_data)
+
+```
+
+
+## Data Splitting and Cross-Validation
+
+```{r}
+sales_split <- initial_split(selected_data, prop = 0.80)
+
+sales_train <- training(sales_split)
+sales_test <- testing(sales_split)
+
+train_folds <- vfold_cv(sales_train, v = 5)
+
+```
+
+
+
+## Exploratory Data Analysis
+
+```{r}
+ordered_data_1 <- selected_data %>%
+  group_by(flavor) %>%
+  summarise(count = n()) %>%
+  arrange(count)
+ggplot(ordered_data_1, aes(x = count, y = reorder(flavor, -count))) + geom_bar(stat = "identity")
+```
+
+
+```{r}
+ordered_data_2 <- selected_data %>%
+  group_by(package) %>%
+  summarise(count = n()) %>%
+  arrange(count)
+ggplot(ordered_data_2, aes(x = count, y = reorder(package, -count))) + geom_bar(stat = "identity")
+```
+```{r}
+ordered_data_3 <- selected_data %>%
+  group_by(category) %>%
+  summarise(count = n()) %>%
+  arrange(count)
+ggplot(ordered_data_3, aes(x = count, y = reorder(category, -count))) + geom_bar(stat = "identity")
+```
+
+```{r}
+cor_data <- sales_train %>% 
+  dplyr::select(where(is.numeric)) 
+corrplot(cor(cor_data), type = 'lower',diag = FALSE)
+```
+
+
+
+
+
+
+## Model Fitting
+### Setting Up Recipe
+
+```{r}
+sales_recipe <- recipe(gross_profit ~ 
+                         category+
+                         volume+
+                         package+
+                         flavor+
+                         price+
+                         store_per_order+
+                         amount_per_order+
+                         sale_store+
+                         initial_days,
+                       data = sales_train) %>% 
+  step_dummy(category, package, flavor) %>% 
+  step_interact(~ volume:starts_with("package")) %>% 
+  step_center(all_predictors()) %>%
+  step_scale(all_predictors())
+
+sales_recipe
+```
+
+### 1. Linear Regression Model
+```{r}
+lm_model <- linear_reg() %>% 
+  set_engine("lm")
+
+lm_wflow <- workflow() %>% 
+  add_model(lm_model) %>% 
+  add_recipe(sales_recipe) 
+
+lm_fit <- fit(lm_wflow, sales_train)
+lm_fit %>% 
+  # This returns the parsnip object:
+  extract_fit_parsnip() %>% 
+  # Now tidy the linear model object:
+  tidy()
+```
+
+```{r}
+sales_train_res <- predict(lm_fit, new_data = sales_train %>%
+                             dplyr::select(-gross_profit))
+sales_train_res %>% 
+  head()
+```
+
+Now we attach a column with the actual observed <mark>gross_profit</mark> observations:           
+
+```{r}
+sales_train_res <- bind_cols(sales_train_res, sales_train %>% 
+                               dplyr::select(gross_profit))
+sales_train_res %>% 
+  head()
+```
+```{r}
+
+# Write Out Results & Workflow:
+save(lm_fit, lm_wflow, file = "Data/model_fitting/lm_fit.rda")
+```
+
+```{r}
+sales_train_res %>% 
+  ggplot(aes(x = .pred, y = gross_profit)) +
+  geom_point(alpha = 0.2) +
+  geom_abline(lty = 2) + 
+  theme_bw() +
+  coord_obs_pred()
+```
+
+
+### 2. Ridge Regression Model
+
+Set up the model specification.
+
+```{r}
+ridge_spec <- 
+  linear_reg(penalty = tune(), mixture = 0) %>% 
+  set_mode("regression") %>% 
+  set_engine("glmnet")
+```
+
+Create a workflow object.
+```{r}
+ridge_workflow <- workflow() %>% 
+  add_recipe(sales_recipe) %>% 
+  add_model(ridge_spec)
+```
+
+Creates a grid of evenly spaced parameter values.
+```{r}
+penalty_grid <- grid_regular(penalty(range = c(-5, 5)), levels = 50)
+penalty_grid
+```
+
+Fit the model.
+```{r, eval=FALSE}
+ridge_tune <- tune_grid(
+  ridge_workflow,
+  resamples = train_folds, 
+  grid = penalty_grid
+)
+
+# Write Out Results & Workflow:
+save(ridge_tune, ridge_workflow, file = "Data/model_fitting/ridge_tune.rda")
+```
+
+
+### 3. Tree Decision Model
+```{r}
+reg_tree_spec <- decision_tree() %>%
+  set_engine("rpart") %>% 
+  set_mode("regression")
+
+reg_tree_wf <- workflow() %>%
+  add_model(reg_tree_spec %>% set_args(cost_complexity = tune())) %>%
+  add_recipe(sales_recipe)
+```
+
+```{r, eval=FALSE}
+
+param_grid <- grid_regular(cost_complexity(range = c(-4, -1)), levels = 10)
+
+tree_tune <- tune_grid(
+  reg_tree_wf, 
+  resamples = train_folds, 
+  grid = param_grid
+)
+
+# Write Out Results & Workflow:
+save(tree_tune, reg_tree_wf, file = "Data/model_fitting/tree_tune.rda")
+```
+
+### 4. Random Forest Model
+
+```{r}
+# ?rand_forest
+rf_spec <- rand_forest(mtry = tune(), trees = tune(), min_n = tune()) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("regression")
+
+rf_wf <- workflow() %>% 
+  add_recipe(sales_recipe) %>% 
+  add_model(rf_spec)
+
+rf_grid <- grid_regular(mtry(range = c(3,8)), trees(range = c(5,2000)), 
+                        min_n(range = c(3,8)), levels = 5)
+
+```
+
+```{r, eval=FALSE}
+rf_tune <- tune_grid(
+  rf_wf, 
+  resamples = train_folds, 
+  grid = rf_grid
+)
+
+# Write Out Results & Workflow:
+save(rf_tune, rf_wf, file = "Data/model_fitting/rf_tune.rda")
+```
+
+
+### 5. Boosted Tree Model
+```{r}
+boost_spec <- boost_tree(trees = tune()) %>%
+  set_engine("xgboost") %>%
+  set_mode("regression")
+
+boost_wf <- workflow() %>% 
+  add_model(boost_spec) %>% 
+  add_recipe(sales_recipe) 
+
+boost_grid <- grid_regular(trees(range = c(10,2000)), levels = 10)
+
+```
+
+```{r, eval=FALSE}
+boost_tune <- tune_grid(
+  boost_wf, 
+  resamples = train_folds,
+  grid = boost_grid
+)
+
+# Write Out Results & Workflow:
+
+save(boost_tune, boost_wf, file = "Data/model_fitting/boost_tune.rda")
+
+```
+
+
+## Model Selection and Performance
+### Load Previous Saved Data
+```{r}
+load("data/model_fitting/lm_fit.rda")
+load("data/model_fitting/ridge_tune.rda")
+load("data/model_fitting/tree_tune.rda")
+load("data/model_fitting/rf_tune.rda")
+load("data/model_fitting/boost_tune.rda")
+```
+
+### 1. Linear Regression Model
+* After fitting the Linear Regression Model, we now compare the fitted value of gross profit to the actual observed value.
+```{r}
+sales_train_res <- predict(lm_fit, new_data = sales_train %>% 
+                               dplyr::select(-gross_profit))
+sales_train_res <- bind_cols(sales_train_res, sales_train %>% 
+                               dplyr::select(gross_profit))
+```
+
+* Thus a generated datafame is shown below:
+
+```{r}
+sales_train_res %>% 
+  head()
+```
+
+* Then, we decide to calcultae "rmse", "rsq", "mae" values to evaluate the performance of this model: 
+
+```{r}
+sales_metrics <- metric_set(rmse, rsq, mae)
+sales_metrics(sales_train_res, truth = gross_profit, 
+                estimate = .pred)
+```
+* As we can see, the rmse value is larger than 80, which is really high, and thus this result indicates that the linear regression model might not be suitable to achieve our goal.
+* We can also plot and visualize the result:
+
+```{r}
+sales_train_res %>% 
+  ggplot(aes(x = .pred, y = gross_profit)) +
+  geom_point(alpha = 0.2) +
+  geom_abline(lty = 2) + 
+  theme_bw() +
+  coord_obs_pred()
+```
+
+* As it is shown above, all the observed values of gross profit concentrate in a certain area, and there are also many outliers that can influence the prediction.
+* Therefore, this linear regression model might NOT be a good way to predict the gross profit.
+
+
+### 2. Ridge Regression Model
+
+* After obtaining the output of tune_grid(),we first use autoplot() to create a visualization of the result:
+
+```{r}
+autoplot(ridge_tune)
+```
+
+* As we can see in the graph, there is a certain point that rmse reaches the lowest level;
+* Thus we use <mark>show_best()</mark> to find the lowest rmse of the best turning ridge model:
+
+```{r}
+show_best(ridge_tune, metric = "rmse") %>% dplyr::select(-.estimator, -.config)
+```
+
+* As it is shown above, the lowest rmse is 77.36626	for the ridge regression model, which is lower than the linear regression model;
+* It is also shown that the best penalty is at the level of 33.93222;
+
+```{r}
+best_penalty <- select_best(ridge_tune, metric = "rmse")
+best_penalty
+```
+
+
+### 3. Tree Decision Model
+
+* For the Tree Decision Model, we use the same analysis procedure;
+* We first use the <mark>autoplot()</mark> function to visulize the tuning result:
+
+```{r}
+autoplot(tree_tune)
+```
+
+* The graph above shows that rmse reaches the lowest level when the cost-complexity parameter is in between 1e-03 and 1e-02;
+* Then we use show_best() and notice that the best rmse of the Tree Decision model is very close to the lowest rmse of Ridge Regression model;
+
+```{r}
+show_best(tree_tune)
+```
+
+### 4. Random Forest Model
+
+* We first visualize the tuning result of Random Forest Model:
+
+```{r}
+autoplot(rf_tune)
+```
+
+* As it is shown above, when the tree number is only five, the results are highly variable, but when the number of trees gets really high, the graph shows that a larger node size results a smaller value of rmse;
+* Then we select the specific best tuning model:
+
+```{r}
+show_best(rf_tune)
+```
+
+* It can be noticed above that the overall rmse is significantly smaller than three previous models, which indicates that random forest might be a better model;
+* However, it also shows that the influence of the number of trees on the rmse is highly variable. 
+
+### 5. Boosted Tree Model
+
+* Again, we first visualize the tuning result:
+* what's interesting is that the graph below shows a contradicting result to the random forest model:
+* it shows that when the smaller the number of trees is, the smaller the rmse is.
+
+```{r}
+autoplot(boost_tune)
+```
+
+* We then select the best tuning model:
+
+```{r}
+show_best(boost_tune)
+```
+
+* Therefore, it shows that the rmse is lowest when the number of trees is 10, which is the lowest level as well;
+* And it also contains a lower rmse than the first three models, while it is still higher than the rmse of the random forest model;
+
+### Final Model Selection and Testing
+
+* According to the analysis above, we find that the Random forest model has the lowest average rmse level, and thus I decide to use the Random Forest model as the final model to do the testing.
+* Thus, we first select the best Random Forest Model, which is the model when <mark> mtry = 5, trees = 5, min_n = 5</mark>;
+
+```{r}
+best_model <- select_best(rf_tune, metric = "rmse")
+best_model
+```
+
+* Then, we fit the model with 
+```{r}
+final_rf <- finalize_workflow(rf_wf, best_model)
+final_fit <- fit(final_rf, data = sales_train)
+
+augmented_result <- augment(final_fit, new_data = sales_test)
+
+augment(final_fit, new_data = sales_test) %>%
+  rmse(truth = gross_profit, estimate = .pred)
+
+```
+
+* As we can see, the tested fit of rmse is <mark>62.58235</mark>, which is similar to the rmse level in the training set;
+* We can also use the vip() function to evaluate the importance of each predictors in this model:
+```{r}
+final_fit %>% 
+  extract_fit_engine() %>% 
+  vip()
+```
+
+* Finally, we use ggplot() to visualize our prediction:
+
+```{r}
+augment(final_fit, new_data = sales_test) %>%
+  ggplot(aes(gross_profit, .pred)) +
+  geom_abline() +
+  geom_point(alpha = 0.5)
+```
+
+* As it is shown in the graph above, this prediction looks better than the linear regression model, since the observed points are no longer highly concentrated.
+* However, there are still many outliers that can reduce the accuracy of prediction
+
+## Conclusion
+
+* In conclusion, this project strives to use five different models in order to predict the possible gross profits of the retail commodities about cakes. 
+* Among the five models, the Random Forest Model has the best performance and is thus selected to test.
+* However, even though the Random Forest model does a relatively better job, its resulting rmse is still much higher than expected, which means that it is still not a good model to predict the gross profit.
+* There are many possible explanations of this:
+    1. It might be because that the training and testing data is highly insufficient, and thus the model cannot be trained well to make good predictions;
+    2. It might be because that there are insufficient number of predictors in this model, which result in an inaccurate trained model;
+    3. It is also worth noticing that two predictors (store_per_order & amount_per_order) were incorrectly selected, because these two predictors are originally calculated by the number of sold orders, which directly contribute the gross profit. 
+    
+* Therefore, this model can definitely have more and better improvements in the future developments.
+
