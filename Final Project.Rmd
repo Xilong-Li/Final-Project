@@ -3,14 +3,14 @@ title: "Final Project"
 author: "Xilong Li (3467966)"
 date: '2022-06-09'
 output:
-  pdf_document:
-    toc: yes
-    df_print: kable
   html_document:
     toc: yes
     toc_float: yes
     code_folding: hide
     df_print: paged
+  pdf_document:
+    toc: yes
+    df_print: kable
 ---
 
 ```{r setup, include=FALSE}
@@ -19,6 +19,13 @@ knitr::opts_chunk$set(echo = TRUE)
 
 
 ## Introduction
+
+The purpose of this project is to generate a model that will predict the <mark>gross profits</mark> of a commodity type: "cookies" and "pastry", based on the commodity's certain properties.       
+I obtained this data from a large local grocery retail company when I was working as an intern for six months. During my internship, I was authorized to download limited amount of selling data. However, due to the confidential requirement of the company, the data used in this project is still intentionally selected in a very limited amount, and the data itself is also mutated.       
+Despite this, this project still serves a function of exploring the potential ways of using machine learning skills to interpret past sales data, in order to better predict the performance of each commodity.        
+Such prediction is important because this can help the retail company to evaluate and analyze the selling performance of each commodity, helping the manager to come out of a better and more comprehensive decision on whether or not to exclude this commodity from the store shell.       
+Therefore, although the result and method in this project might be far from the standard of being used commercially, it is still a good chance of personal practice and exploration on the issue of predicting the product's gross profit, which, according to my internship experience, had not been widely used by my company.        
+
 ### Loading Data and Packages
 ```{r,message=FALSE}
 library(tidymodels)
@@ -37,22 +44,27 @@ library(corrplot)
 library(ranger)
 ```
 
-* <mark>gross_profit: </mark>       
-* <mark>category: </mark>       
-* <mark>volume: </mark>       
-* <mark>volume_range: </mark>       
-* <mark>package: </mark>        
-* <mark>flavor: </mark>       
-* <mark>price: </mark>        
-* <mark>StorePerOrder: </mark>        
-* <mark>AmountPerOrder: </mark>       
-* <mark>Sale_Store: </mark>       
-* <mark>initial_days: </mark>       
+The codebook is explained below:
+    
+* <mark>gross_profit: </mark> The gross profit that this specific commodity has created in the selected period of time;      
+* <mark>category: </mark> Four specific categories of the the commodity, includes Cookies, Pastry, Biscuit, and Wafer;     
+* <mark>volume: </mark> The volume of the commodity, calculated in grams;      
+* <mark>volume_range: </mark> The ranged volume of the commodity;
+* <mark>package: </mark> The package of the commodity, includes Can, Bag, and Box;
+* <mark>flavor: </mark> The flavor of the commodity;
+* <mark>price: </mark> The selling price of the commodity;   
+* <mark>StorePerOrder: </mark> The number of store per order of this commodity;
+* <mark>AmountPerOrder: </mark> The number of sold amount per order of this commodity;
+* <mark>Sale_Store: </mark> The number of stores that is selling this commodity; 
+* <mark>initial_days: </mark> The number of days since this commodity was being sold;
+    
+It is also important to mention that, since the original data was extracted from the data base in a Chinese version, I had to manually convert all the Chinese vocabularies into English, in order for R to accurately load the data.
 
 ```{r}
+
+# Reading the original data;
 original_data <- read.csv("Translated_data.csv")
 head(original_data)
-dim(original_data)
 
 set.seed(2216)
 ```
@@ -61,12 +73,18 @@ set.seed(2216)
 ## Data Cleansing
 
 ```{r}
+# use clean_names() function to clean the column names of the data
 original_data <- original_data %>% 
   clean_names()
 
 head(original_data)
 ```
 
+The code below shows the selections process of the data that is going to be used to train the model:
+1. turns the predictors "category", "flavor", "package" and "volume_range" into factor;
+2. Since the original data about "volume" included the unit "grams", I deleted all the "g" from each data point and turn it into numeric;
+3. Selected "category, volume, volume_range, package, flavor, price, store_per_order, amount_per_order, sale_store, initial_days" as predictors for "gross_profit"
+4. deleted data that has zero value;
 
 ```{r}
 selected_data <- original_data %>% 
@@ -98,18 +116,23 @@ head(selected_data)
 ## Data Splitting and Cross-Validation
 
 ```{r}
-sales_split <- initial_split(selected_data, prop = 0.80)
+sales_split <- initial_split(selected_data, prop = 0.80) # set the probability as 80%
 
 sales_train <- training(sales_split)
 sales_test <- testing(sales_split)
 
-train_folds <- vfold_cv(sales_train, v = 5)
+train_folds <- vfold_cv(sales_train, v = 5) # establish the fold level as 5;
 
 ```
 
 
 
 ## Exploratory Data Analysis
+
+* In order to analyze my data set, I first realized that there all many categorical predictors that might affect the prediction results;
+* Therefore, I counted the numbers of three predictors: "flavor", "package", "category" to understand the specific distributions in these three predictors;
+* And the results below shows that some factors in each predictors are outnumbered by the others, such as "Mixed" in the "flavor" predictor and "can" in the "package" predictor;
+* As a result, such uneven distribution of interior factors in these predictors might affect the accuracy of the model training and prediction;
 
 ```{r}
 ordered_data_1 <- selected_data %>%
@@ -135,19 +158,23 @@ ordered_data_3 <- selected_data %>%
 ggplot(ordered_data_3, aes(x = count, y = reorder(category, -count))) + geom_bar(stat = "identity")
 ```
 
+* I also used the correlation graph to evaluate the interactions between each numeric predictor;
+* And it shows that price has a very strong positive correlation with volume; It makes sense since that the larger the volume of the package, the higher the price would be. 
+* And sale_store has very high negative correlation with store_per_order, which also makes sense since store_per_order is directly calculated based on the number of stores;
+
 ```{r}
 cor_data <- sales_train %>% 
   dplyr::select(where(is.numeric)) 
 corrplot(cor(cor_data), type = 'lower',diag = FALSE)
 ```
 
-
-
-
-
-
 ## Model Fitting
 ### Setting Up Recipe
+
+* Then, we establish the recipe that can be used in later modeling;
+* I excluded the predictor "volume_range" since it keeps showing errors when I was trying to fit. So I used "volume" instead since they express the same information;
+* Center and scale the predictors and establish dummy variables (category, package, flavor);
+* I also added the interaction between volume and package, since it might be possible that different volume requires different package.
 
 ```{r}
 sales_recipe <- recipe(gross_profit ~ 
@@ -176,46 +203,22 @@ lm_model <- linear_reg() %>%
 
 lm_wflow <- workflow() %>% 
   add_model(lm_model) %>% 
-  add_recipe(sales_recipe) 
+  add_recipe(sales_recipe)
+```
 
+* We create the fit function and save the result:
+
+```{r, eval=FALSE}
 lm_fit <- fit(lm_wflow, sales_train)
 lm_fit %>% 
   # This returns the parsnip object:
   extract_fit_parsnip() %>% 
   # Now tidy the linear model object:
   tidy()
-```
-
-```{r}
-sales_train_res <- predict(lm_fit, new_data = sales_train %>%
-                             dplyr::select(-gross_profit))
-sales_train_res %>% 
-  head()
-```
-
-Now we attach a column with the actual observed <mark>gross_profit</mark> observations:           
-
-```{r}
-sales_train_res <- bind_cols(sales_train_res, sales_train %>% 
-                               dplyr::select(gross_profit))
-sales_train_res %>% 
-  head()
-```
-```{r}
 
 # Write Out Results & Workflow:
 save(lm_fit, lm_wflow, file = "Data/model_fitting/lm_fit.rda")
 ```
-
-```{r}
-sales_train_res %>% 
-  ggplot(aes(x = .pred, y = gross_profit)) +
-  geom_point(alpha = 0.2) +
-  geom_abline(lty = 2) + 
-  theme_bw() +
-  coord_obs_pred()
-```
-
 
 ### 2. Ridge Regression Model
 
@@ -241,7 +244,7 @@ penalty_grid <- grid_regular(penalty(range = c(-5, 5)), levels = 50)
 penalty_grid
 ```
 
-Fit the model.
+Tune the model and save the result for later use.
 ```{r, eval=FALSE}
 ridge_tune <- tune_grid(
   ridge_workflow,
@@ -255,20 +258,28 @@ save(ridge_tune, ridge_workflow, file = "Data/model_fitting/ridge_tune.rda")
 
 
 ### 3. Tree Decision Model
+
+Set up the model specification.
 ```{r}
 reg_tree_spec <- decision_tree() %>%
   set_engine("rpart") %>% 
   set_mode("regression")
+```
 
+Create a workflow object.
+```{r}
 reg_tree_wf <- workflow() %>%
   add_model(reg_tree_spec %>% set_args(cost_complexity = tune())) %>%
   add_recipe(sales_recipe)
 ```
 
+Creates a grid of evenly spaced parameter values.
 ```{r, eval=FALSE}
-
 param_grid <- grid_regular(cost_complexity(range = c(-4, -1)), levels = 10)
+```
 
+Tune the model and save the result for later use.
+```{r, eval=FALSE}
 tree_tune <- tune_grid(
   reg_tree_wf, 
   resamples = train_folds, 
@@ -281,21 +292,28 @@ save(tree_tune, reg_tree_wf, file = "Data/model_fitting/tree_tune.rda")
 
 ### 4. Random Forest Model
 
+Set up the model specification.
 ```{r}
-# ?rand_forest
 rf_spec <- rand_forest(mtry = tune(), trees = tune(), min_n = tune()) %>%
   set_engine("ranger", importance = "impurity") %>%
   set_mode("regression")
+```
 
+Create a workflow object.
+```{r}
 rf_wf <- workflow() %>% 
   add_recipe(sales_recipe) %>% 
   add_model(rf_spec)
+```
 
+Creates a grid of evenly spaced parameter values.
+```{r}
 rf_grid <- grid_regular(mtry(range = c(3,8)), trees(range = c(5,2000)), 
                         min_n(range = c(3,8)), levels = 5)
 
 ```
 
+Tune the model and save the result for later use.
 ```{r, eval=FALSE}
 rf_tune <- tune_grid(
   rf_wf, 
@@ -309,19 +327,28 @@ save(rf_tune, rf_wf, file = "Data/model_fitting/rf_tune.rda")
 
 
 ### 5. Boosted Tree Model
+
+Set up the model specification.
 ```{r}
 boost_spec <- boost_tree(trees = tune()) %>%
   set_engine("xgboost") %>%
   set_mode("regression")
+```
 
+Create a workflow object.
+```{r}
 boost_wf <- workflow() %>% 
   add_model(boost_spec) %>% 
-  add_recipe(sales_recipe) 
+  add_recipe(sales_recipe)
+```
 
+Creates a grid of evenly spaced parameter values.
+```{r}
 boost_grid <- grid_regular(trees(range = c(10,2000)), levels = 10)
 
 ```
 
+Tune the model and save the result for later use.
 ```{r, eval=FALSE}
 boost_tune <- tune_grid(
   boost_wf, 

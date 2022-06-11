@@ -1,0 +1,13 @@
+The codebook is explained below:
+    
+* <mark>gross_profit: </mark> The gross profit that this specific commodity has created in the selected period of time;      
+* <mark>category: </mark> Four specific categories of the the commodity, includes Cookies, Pastry, Biscuit, and Wafer;     
+* <mark>volume: </mark> The volume of the commodity, calculated in grams;      
+* <mark>volume_range: </mark> The ranged volume of the commodity;
+* <mark>package: </mark> The package of the commodity, includes Can, Bag, and Box;
+* <mark>flavor: </mark> The flavor of the commodity;
+* <mark>price: </mark> The selling price of the commodity;   
+* <mark>StorePerOrder: </mark> The number of store per order of this commodity;
+* <mark>AmountPerOrder: </mark> The number of sold amount per order of this commodity;
+* <mark>Sale_Store: </mark> The number of stores that is selling this commodity; 
+* <mark>initial_days: </mark> The number of days since this commodity was being sold;
